@@ -19,7 +19,7 @@ from teleop.robot_control.robot_arm_ik import G1_29_ArmIK, G1_23_ArmIK, H1_2_Arm
 from teleimager.image_client import ImageClient
 from teleop.utils.episode_writer import EpisodeWriter
 from teleop.utils.ipc import IPC_Server
-from teleop.utils.motion_switcher import MotionSwitcher, LocoClientWrapper
+from teleop.utils.motion_switcher import MotionSwitcher, LocoClientWrapper, G1DAgvClientWrapper
 from sshkeyboard import listen_keyboard, stop_listening
 
 # for simulation
@@ -70,6 +70,9 @@ def get_state() -> dict:
         "RECORD_RUNNING": RECORD_RUNNING,
     }
 
+def clip_unit(value):
+    return max(-1.0, min(1.0, float(value)))
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     # basic control parameters
@@ -83,6 +86,11 @@ if __name__ == '__main__':
     parser.add_argument('--network-interface', type=str, default=None, help='Network interface for dds communication, e.g., eth0, wlan0. If None, use default interface.')
     # mode flags
     parser.add_argument('--motion', action = 'store_true', help = 'Enable motion control mode')
+    parser.add_argument('--motion-base', type=str, choices=['loco', 'g1d_agv'], default='loco', help='Select motion-control backend')
+    parser.add_argument('--motion-max-vx', type=float, default=0.2, help='Max forward velocity from controller stick, m/s')
+    parser.add_argument('--motion-max-vy', type=float, default=0.3, help='Max lateral velocity from controller stick, m/s')
+    parser.add_argument('--motion-max-vyaw', type=float, default=0.3, help='Max yaw velocity from controller stick, rad/s')
+    parser.add_argument('--g1d-column-scale', type=float, default=0.5, help='Max normalized G1-D column velocity from right stick Y')
     parser.add_argument('--headless', action='store_true', help='Enable headless mode (no display)')
     parser.add_argument('--sim', action = 'store_true', help = 'Enable isaac simulation mode')
     parser.add_argument('--ipc', action = 'store_true', help = 'Enable IPC server to handle input; otherwise enable sshkeyboard')
@@ -99,6 +107,10 @@ if __name__ == '__main__':
     logger_mp.debug(f"args: {args}")
 
     try:
+        if args.motion and args.motion_base == "g1d_agv" and args.input_mode != "controller":
+            raise ValueError("--motion-base g1d_agv requires --input-mode controller.")
+        arm_motion_mode = args.motion and args.motion_base != "g1d_agv"
+
         # setup dds communication domains id
         if args.sim:
             ChannelFactoryInitialize(1, networkInterface=args.network_interface)
@@ -139,7 +151,11 @@ if __name__ == '__main__':
         # motion mode (G1: Regular mode R1+X, not Running mode R2+A)
         if args.motion:
             if args.input_mode == "controller":
-                loco_wrapper = LocoClientWrapper()
+                if args.motion_base == "g1d_agv":
+                    loco_wrapper = G1DAgvClientWrapper()
+                    logger_mp.info("Motion backend: G1-D AGV; arm commands stay on rt/lowcmd.")
+                else:
+                    loco_wrapper = LocoClientWrapper()
         else:
             motion_switcher = MotionSwitcher()
             status, result = motion_switcher.Enter_Debug_Mode()
@@ -148,19 +164,19 @@ if __name__ == '__main__':
         # arm
         if args.arm == "G1_29":
             arm_ik = G1_29_ArmIK()
-            arm_ctrl = G1_29_ArmController(motion_mode=args.motion, simulation_mode=args.sim)
+            arm_ctrl = G1_29_ArmController(motion_mode=arm_motion_mode, simulation_mode=args.sim)
         elif args.arm == "G1_23":
             arm_ik = G1_23_ArmIK()
-            arm_ctrl = G1_23_ArmController(motion_mode=args.motion, simulation_mode=args.sim)
+            arm_ctrl = G1_23_ArmController(motion_mode=arm_motion_mode, simulation_mode=args.sim)
         elif args.arm == "H1_2":
             arm_ik = H1_2_ArmIK()
-            arm_ctrl = H1_2_ArmController(motion_mode=args.motion, simulation_mode=args.sim)
+            arm_ctrl = H1_2_ArmController(motion_mode=arm_motion_mode, simulation_mode=args.sim)
         elif args.arm == "H1":
             arm_ik = H1_ArmIK()
             arm_ctrl = H1_ArmController(simulation_mode=args.sim)
         elif args.arm == "H2":
             arm_ik = H2_ArmIK()
-            arm_ctrl = H2_ArmController(motion_mode=args.motion, simulation_mode=args.sim)
+            arm_ctrl = H2_ArmController(motion_mode=arm_motion_mode, simulation_mode=args.sim)
 
         # end-effector
         xr_motion_data_ready = Value('b', False, lock=True)        # [input] whether XR hand/controller motion data has arrived
@@ -352,9 +368,17 @@ if __name__ == '__main__':
                 if tele_data.left_ctrl_thumbstick and tele_data.right_ctrl_thumbstick:
                     loco_wrapper.Damp()
                 # https://github.com/unitreerobotics/xr_teleoperate/issues/135, control, limit velocity to within 0.3
-                loco_wrapper.Move(-tele_data.left_ctrl_thumbstickValue[1] * 0.3,
-                                  -tele_data.left_ctrl_thumbstickValue[0] * 0.3,
-                                  -tele_data.right_ctrl_thumbstickValue[0]* 0.3)
+                if args.motion_base == "g1d_agv":
+                    if not (tele_data.left_ctrl_thumbstick and tele_data.right_ctrl_thumbstick):
+                        vx = clip_unit(-tele_data.left_ctrl_thumbstickValue[1]) * args.motion_max_vx
+                        vyaw = clip_unit(-tele_data.left_ctrl_thumbstickValue[0]) * args.motion_max_vyaw
+                        column_vz = clip_unit(-tele_data.right_ctrl_thumbstickValue[1]) * args.g1d_column_scale
+                        loco_wrapper.Move(vx, 0.0, vyaw)
+                        loco_wrapper.HeightAdjust(column_vz)
+                else:
+                    loco_wrapper.Move(-tele_data.left_ctrl_thumbstickValue[1] * args.motion_max_vx,
+                                      -tele_data.left_ctrl_thumbstickValue[0] * args.motion_max_vy,
+                                      -tele_data.right_ctrl_thumbstickValue[0] * args.motion_max_vyaw)
 
             # get current robot state data.
             current_lr_arm_q  = arm_ctrl.get_current_dual_arm_q()
@@ -534,6 +558,12 @@ if __name__ == '__main__':
             arm_ctrl.ctrl_dual_arm_go_home()
         except Exception as e:
             logger_mp.error(f"Failed to ctrl_dual_arm_go_home: {e}")
+
+        try:
+            if args.motion and 'loco_wrapper' in locals() and hasattr(loco_wrapper, "Stop"):
+                loco_wrapper.Stop()
+        except Exception as e:
+            logger_mp.error(f"Failed to stop motion wrapper: {e}")
         
         try:
             if args.ipc:

@@ -48,17 +48,44 @@ RECORD_TOGGLE  = False  # Toggle recording state
 #  ==> manual: when READY is True, set RECORD_TOGGLE=True to transition.
 #  --> auto  : Auto-transition after saving data.
 
-def on_press(key):
+CONTROLLER_BUTTON_ACTIONS = {
+    # Pico/Quest-style controller labels: left A/B are usually shown as X/Y.
+    "left_ctrl_aButton": ("r", "left X"),
+    "left_ctrl_bButton": ("s", "left Y"),
+    "right_ctrl_aButton": ("q", "right A"),
+}
+
+def handle_control_key(key, source="keyboard"):
     global STOP, START, RECORD_TOGGLE
     if key == 'r':
         START = True
+        logger_mp.info(f"[{source}] start teleop requested.")
     elif key == 'q':
         START = False
         STOP = True
+        logger_mp.info(f"[{source}] stop teleop requested.")
     elif key == 's' and START == True:
         RECORD_TOGGLE = True
+        logger_mp.info(f"[{source}] recording toggle requested.")
+    elif key == 's':
+        logger_mp.warning(f"[{source}] recording toggle ignored because teleop has not started.")
     else:
-        logger_mp.warning(f"[on_press] {key} was pressed, but no action is defined for this key.")
+        logger_mp.warning(f"[{source}] {key} was pressed, but no action is defined for this key.")
+
+def on_press(key):
+    handle_control_key(key)
+
+class ControllerButtonMapper:
+    def __init__(self):
+        self.previous_buttons = {button_name: False for button_name in CONTROLLER_BUTTON_ACTIONS}
+
+    def update(self, tele_data):
+        for button_name, (key, label) in CONTROLLER_BUTTON_ACTIONS.items():
+            is_pressed = bool(getattr(tele_data, button_name, False))
+            was_pressed = self.previous_buttons[button_name]
+            if is_pressed and not was_pressed:
+                handle_control_key(key, source=f"Pico {label}")
+            self.previous_buttons[button_name] = is_pressed
 
 def get_state() -> dict:
     """Return current heartbeat state"""
@@ -147,6 +174,7 @@ if __name__ == '__main__':
                                      webrtc_url=f"https://{args.img_server_ip}:{camera_config['head_camera']['webrtc_port']}/offer",
                                      arm_reference_mode="head_yaw"
                                      )
+        controller_button_mapper = ControllerButtonMapper() if args.input_mode == "controller" else None
         
         # motion mode (G1: Regular mode R1+X, not Running mode R2+A)
         if args.motion:
@@ -275,12 +303,12 @@ if __name__ == '__main__':
                                      rerun_log = not args.headless)
 
         logger_mp.info("----------------------------------------------------------------")
-        logger_mp.info("🟢  Press [r] to start syncing the robot with your movements.")
+        logger_mp.info("🟢  Press [r] or Pico left X to start syncing the robot with your movements.")
         if args.record:
-            logger_mp.info("🟡  Press [s] to START or SAVE recording (toggle cycle).")
+            logger_mp.info("🟡  Press [s] or Pico left Y to START or SAVE recording (toggle cycle).")
         else:
             logger_mp.info("🔵  Recording is DISABLED (run with --record to enable).")
-        logger_mp.info("🔴  Press [q] to stop and exit the program.")
+        logger_mp.info("🔴  Press [q] or Pico right A to stop and exit the program.")
         logger_mp.info("⚠️  IMPORTANT: Please keep your distance and stay safe.")
         READY = True                  # now ready to (1) enter START state
         while not START and not STOP: # wait for start or stop signal.
@@ -289,6 +317,13 @@ if __name__ == '__main__':
                 head_img = img_client.get_head_frame()
                 if head_img.bgr is not None:
                     tv_wrapper.render_to_xr(head_img.bgr)
+            if controller_button_mapper is not None:
+                tele_data = tv_wrapper.get_tele_data()
+                controller_button_mapper.update(tele_data)
+
+        if STOP:
+            logger_mp.info("Stop requested before tracking started.")
+            raise KeyboardInterrupt
 
         logger_mp.info("---------------------🚀start Tracking🚀-------------------------")
         arm_ctrl.speed_gradual_max()
@@ -313,6 +348,13 @@ if __name__ == '__main__':
                 if args.record:
                     right_wrist_img = img_client.get_right_wrist_frame()
 
+            # get xr's tele data and controller button actions
+            tele_data = tv_wrapper.get_tele_data()
+            if controller_button_mapper is not None:
+                controller_button_mapper.update(tele_data)
+            if STOP:
+                break
+
             # record mode
             if args.record and RECORD_TOGGLE:
                 RECORD_TOGGLE = False
@@ -327,8 +369,6 @@ if __name__ == '__main__':
                     if args.sim:
                         publish_reset_category(1, reset_pose_publisher)
 
-            # get xr's tele data
-            tele_data = tv_wrapper.get_tele_data()
             if args.ee in ("dex3", "inspire_ftp", "inspire_dfx", "brainco")  and args.input_mode == "hand":
                 with left_hand_pos_array.get_lock():
                     left_hand_pos_array[:] = tele_data.left_hand_pos.flatten()
@@ -360,10 +400,6 @@ if __name__ == '__main__':
             
             # high level control
             if args.input_mode == "controller" and args.motion:
-                # quit teleoperate
-                if tele_data.right_ctrl_aButton:
-                    START = False
-                    STOP = True
                 # command robot to enter damping mode. soft emergency stop function
                 if tele_data.left_ctrl_thumbstick and tele_data.right_ctrl_thumbstick:
                     loco_wrapper.Damp()

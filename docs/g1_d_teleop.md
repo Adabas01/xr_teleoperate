@@ -418,11 +418,29 @@ Hold the Pico controllers near the robot initial arm pose before pressing `r`.
 | Left trigger | Left Dex1 gripper |
 | Right trigger | Right Dex1 gripper |
 | Left stick up/down | Wheel base forward/back |
-| Left stick left/right | Wheel base yaw |
+| Left stick left/right | Wheel base yaw by default |
 | Right stick up/down | Column up/down |
-| Right stick left/right | Ignored |
+| Right stick left/right | Ignored by default, wheel base yaw with `--g1d-left-stick-x-mode=torso_yaw` |
+| Left/right side triggers | Torso yaw with `--g1d-torso-yaw-input=side_triggers` |
 | Both thumbsticks pressed | Stop base and column |
 | Right controller A | Exit teleop |
+
+To try torso yaw on the side triggers, add this flag to the G1-D teleop command:
+
+```bash
+  --g1d-torso-yaw-input=side_triggers
+```
+
+The torso yaw target is rate-controlled from the selected input, starts at the measured waist yaw, and is clamped to `--torso-yaw-limit` radians on either side of that startup pose. Set `--torso-yaw-max-rate` to change how quickly it moves.
+
+To include torso yaw in episodes started with `s`, run with recording enabled and add:
+
+```bash
+  --record \
+  --record-torso-yaw
+```
+
+Each recorded frame will include `states.body.torso_yaw`, `actions.body.torso_yaw_target`, and `actions.body.torso_yaw_input`.
 
 ## Troubleshooting
 

@@ -8,6 +8,7 @@ from .rerun_visualizer import RerunLogger
 from queue import Queue, Empty
 from threading import Thread
 import logging_mp
+import shutil  # pribavoj
 logger_mp = logging_mp.getLogger(__name__)
 
 class EpisodeWriter():
@@ -231,3 +232,24 @@ class EpisodeWriter():
             time.sleep(0.01)
         self.stop_worker = True
         self.worker_thread.join()
+
+    def discard_episode(self):  # pribavoj
+        """
+        Abort the current episode and delete all files written so far.
+        """
+        if self.is_available:
+            logger_mp.info("No active episode to discard.")
+            return
+
+        # Wait until all queued writes are finished
+        self.item_data_queue.join()
+
+        try:
+            if os.path.exists(self.episode_dir):
+                shutil.rmtree(self.episode_dir)
+                logger_mp.info(f"==> Episode discarded: {self.episode_dir}")
+        except Exception as e:
+            logger_mp.error(f"Failed to discard episode: {e}")
+
+        self.need_save = False
+        self.is_available = True

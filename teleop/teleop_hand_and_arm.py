@@ -2,6 +2,7 @@ import time
 import argparse
 from multiprocessing import Value, Array, Lock
 import threading
+import numpy as np
 import logging_mp
 logging_mp.basicConfig(level=logging_mp.INFO)
 logger_mp = logging_mp.getLogger(__name__)
@@ -34,6 +35,8 @@ def publish_reset_category(category: int, publisher): # Scene Reset signal
 # state transition
 START          = False  # Enable to start robot following VR user motion
 STOP           = False  # Enable to begin system exit procedure
+PAUSED         = False  # Hold robot commands while keeping the teleop process alive
+PAUSE_TOGGLE   = False  # Request a transition between tracking and paused states
 READY          = False  # Ready to (1) enter START state, (2) enter RECORD_RUNNING state
 RECORD_RUNNING = False  # True if [Recording]
 RECORD_TOGGLE  = False  # Toggle recording state
@@ -59,17 +62,30 @@ CONTROLLER_BUTTON_ACTIONS = {
 }
 
 def handle_control_key(key, source="keyboard"):
-    global STOP, START, RECORD_TOGGLE, RECORD_DISCARD
-    if key == 'r':
-        START = True
-        logger_mp.info(f"[{source}] start teleop requested.")
+    global STOP, START, PAUSED, PAUSE_TOGGLE, RECORD_TOGGLE, RECORD_DISCARD
+    if key in ('r', 'start'):
+        if not START:
+            START = True
+            logger_mp.info(f"[{source}] start teleop requested.")
+        elif key == 'r':
+            PAUSE_TOGGLE = True
+            logger_mp.info(f"[{source}] {'resume' if PAUSED else 'pause'} teleop requested.")
+        else:
+            logger_mp.info(f"[{source}] teleop is already started.")
+    elif key == 'p' and START:
+        PAUSE_TOGGLE = True
+        logger_mp.info(f"[{source}] {'resume' if PAUSED else 'pause'} teleop requested.")
+    elif key == 'p':
+        logger_mp.warning(f"[{source}] pause toggle ignored because teleop has not started.")
     elif key == 'q':
         START = False
         STOP = True
         logger_mp.info(f"[{source}] stop teleop requested.")
-    elif key == 's' and START == True:
+    elif key == 's' and START and not PAUSED:
         RECORD_TOGGLE = True
         logger_mp.info(f"[{source}] recording toggle requested.")
+    elif key == 's' and PAUSED:
+        logger_mp.warning(f"[{source}] recording toggle ignored while teleop is paused.")
     elif key == 's':
         logger_mp.warning(f"[{source}] recording toggle ignored because teleop has not started.")
     elif key == 'd' and RECORD_RUNNING:  # pribavoj
@@ -95,10 +111,11 @@ class ControllerButtonMapper:
 
 def get_state() -> dict:
     """Return current heartbeat state"""
-    global START, STOP, RECORD_RUNNING, READY
+    global START, STOP, PAUSED, RECORD_RUNNING, READY
     return {
         "START": START,
         "STOP": STOP,
+        "PAUSED": PAUSED,
         "READY": READY,
         "RECORD_RUNNING": RECORD_RUNNING,
     }
@@ -122,6 +139,97 @@ def controller_analog_button_value(is_pressed, value):
         return 1.0
     return value
 
+def make_pose_clutch(held_target_pose, resume_input_pose):
+    """Create offsets that make the current XR pose equal the held robot target."""
+    held_target_pose = np.asarray(held_target_pose)
+    resume_input_pose = np.asarray(resume_input_pose)
+    rotation_offset = held_target_pose[:3, :3] @ resume_input_pose[:3, :3].T
+    position_offset = held_target_pose[:3, 3] - resume_input_pose[:3, 3]
+    return rotation_offset, position_offset
+
+def apply_pose_clutch(input_pose, clutch):
+    """Apply a pause/resume clutch while preserving subsequent relative motion."""
+    target_pose = np.array(input_pose, copy=True)
+    if clutch is None:
+        return target_pose
+    rotation_offset, position_offset = clutch
+    target_pose[:3, :3] = rotation_offset @ target_pose[:3, :3]
+    target_pose[:3, 3] += position_offset
+    return target_pose
+
+def controller_motion_is_neutral(tele_data, deadband, include_side_triggers=False):
+    """Return True when resuming cannot immediately command base/column motion."""
+    axes = [
+        *tele_data.left_ctrl_thumbstickValue,
+        *tele_data.right_ctrl_thumbstickValue,
+    ]
+    if include_side_triggers:
+        axes.extend([
+            controller_analog_button_value(tele_data.left_ctrl_squeeze, tele_data.left_ctrl_squeezeValue),
+            controller_analog_button_value(tele_data.right_ctrl_squeeze, tele_data.right_ctrl_squeezeValue),
+        ])
+    return all(abs(float(value)) <= deadband for value in axes)
+
+def dex1_trigger_position(value):
+    """Map the XR trigger value to the Dex1 position used by its controller."""
+    return float(np.interp(clamp(value, 0.0, 10.0), [5.0, 7.0], [0.0, 5.4]))
+
+def apply_dex1_soft_takeover(input_value, held_input_value, previous_input_value, tolerance=0.18):
+    """Hold a Dex1 command until the physical trigger reaches that command."""
+    input_value = float(input_value)
+    if held_input_value is None:
+        return input_value, None
+
+    held_position = dex1_trigger_position(held_input_value)
+    input_position = dex1_trigger_position(input_value)
+    reached = abs(input_position - held_position) <= tolerance
+    if previous_input_value is not None:
+        previous_position = dex1_trigger_position(previous_input_value)
+        reached = reached or (
+            (previous_position - held_position) * (input_position - held_position) <= 0.0
+        )
+
+    if reached:
+        return input_value, None
+    return float(held_input_value), float(held_input_value)
+
+def frame_bgr(frame):
+    """Return a decoded camera image, or None while a stream has no frame."""
+    return None if frame is None else getattr(frame, "bgr", None)
+
+def build_recording_colors(camera_config, head_img, left_wrist_img, right_wrist_img):
+    """Build a complete set of recording images without using missing frames."""
+    camera_frames = (
+        ("head", camera_config['head_camera'], head_img),
+        ("left wrist", camera_config['left_wrist_camera'], left_wrist_img),
+        ("right wrist", camera_config['right_wrist_camera'], right_wrist_img),
+    )
+    decoded_frames = {
+        name: frame_bgr(frame)
+        for name, config, frame in camera_frames
+        if config['enable_zmq']
+    }
+    missing_cameras = [name for name, image in decoded_frames.items() if image is None]
+    if missing_cameras:
+        return {}, missing_cameras
+
+    colors = {}
+    if camera_config['head_camera']['enable_zmq']:
+        head_bgr = decoded_frames['head']
+        if camera_config['head_camera']['binocular']:
+            eye_width = camera_config['head_camera']['image_shape'][1] // 2
+            colors["color_0"] = head_bgr[:, :eye_width]
+            colors["color_1"] = head_bgr[:, eye_width:]
+        else:
+            colors["color_0"] = head_bgr
+
+    wrist_color_index = 2 if camera_config['head_camera']['binocular'] else 1
+    if camera_config['left_wrist_camera']['enable_zmq']:
+        colors[f"color_{wrist_color_index}"] = decoded_frames['left wrist']
+    if camera_config['right_wrist_camera']['enable_zmq']:
+        colors[f"color_{wrist_color_index + 1}"] = decoded_frames['right wrist']
+    return colors, []
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     # basic control parameters
@@ -131,7 +239,8 @@ if __name__ == '__main__':
     parser.add_argument('--arm', type=str, choices=['G1_29', 'G1_23', 'H1_2', 'H1', 'H2'], default='G1_29', help='Select arm controller')
     parser.add_argument('--ee', type=str, choices=['dex1', 'dex3', 'inspire_ftp', 'inspire_dfx', 'brainco'], help='Select end effector controller')
     # network parameters
-    parser.add_argument('--img-server-ip', type=str, default='192.168.123.164', help='IP address of image server, used by teleimager and televuer')
+    parser.add_argument('--img-server-ip', type=str, default='192.168.123.164', help='Image-server IP used by the laptop for camera config and ZMQ frames')
+    parser.add_argument('--webrtc-server-ip', type=str, default=None, help='Optional image-server IP reachable by the XR headset; defaults to --img-server-ip')
     parser.add_argument('--network-interface', type=str, default=None, help='Network interface for dds communication, e.g., eth0, wlan0. If None, use default interface.')
     # mode flags
     parser.add_argument('--motion', action = 'store_true', help = 'Enable motion control mode')
@@ -145,6 +254,7 @@ if __name__ == '__main__':
     parser.add_argument('--torso-yaw-max-rate', type=float, default=0.9, help='Max torso yaw target rate, rad/s')
     parser.add_argument('--torso-yaw-limit', type=float, default=2.0, help='Symmetric torso yaw software limit for joystick control, rad')
     parser.add_argument('--torso-yaw-deadband', type=float, default=0.08, help='Controller deadband for torso yaw input')
+    parser.add_argument('--pause-resume-mode', type=str, choices=['clutch', 'match'], default='clutch', help='On resume, preserve the held arm/gripper pose (clutch) or move toward the current XR pose (match)')
     parser.add_argument('--headless', action='store_true', help='Enable headless mode (no display)')
     parser.add_argument('--sim', action = 'store_true', help = 'Enable isaac simulation mode')
     parser.add_argument('--ipc', action = 'store_true', help = 'Enable IPC server to handle input; otherwise enable sshkeyboard')
@@ -177,6 +287,7 @@ if __name__ == '__main__':
         else:
             g1d_torso_yaw_input = args.g1d_torso_yaw_input or "none"
         arm_motion_mode = args.motion and args.motion_base != "g1d_agv"
+        webrtc_server_ip = args.webrtc_server_ip or args.img_server_ip
 
         # setup dds communication domains id
         if args.sim:
@@ -199,6 +310,10 @@ if __name__ == '__main__':
         img_client = ImageClient(host=args.img_server_ip, request_bgr=True)
         camera_config = img_client.get_cam_config()
         logger_mp.debug(f"Camera config: {camera_config}")
+        logger_mp.info(
+            f"Camera data server: {args.img_server_ip}; "
+            f"XR WebRTC server: {webrtc_server_ip}."
+        )
         xr_need_local_img = not (args.display_mode == 'pass-through' or camera_config['head_camera']['enable_webrtc'])
 
         # televuer_wrapper: obtain hand pose data from the XR device and transmit the robot's head camera image to the XR device.
@@ -211,7 +326,7 @@ if __name__ == '__main__':
                                      display_mode=args.display_mode,
                                      zmq=camera_config['head_camera']['enable_zmq'],
                                      webrtc=camera_config['head_camera']['enable_webrtc'],
-                                     webrtc_url=f"https://{args.img_server_ip}:{camera_config['head_camera']['webrtc_port']}/offer",
+                                     webrtc_url=f"https://{webrtc_server_ip}:{camera_config['head_camera']['webrtc_port']}/offer",
                                      arm_reference_mode="head_yaw"
                                      )
         controller_button_mapper = ControllerButtonMapper() if args.input_mode == "controller" else None
@@ -367,7 +482,8 @@ if __name__ == '__main__':
                                      rerun_log = not args.headless)
 
         logger_mp.info("----------------------------------------------------------------")
-        logger_mp.info("🟢  Press [r] or Pico left X to start syncing the robot with your movements.")
+        logger_mp.info("🟢  Press [r] or Pico left X to START, PAUSE, or RESUME teleoperation.")
+        logger_mp.info(f"Pause resume mode: {args.pause_resume_mode}.")
         if args.record:
             logger_mp.info("🟡  Press [s] or Pico left Y to START or SAVE recording (toggle cycle).")
             logger_mp.info("🟠  Press Pico right B to DISCARD the current recording.")  # pribavoj
@@ -393,6 +509,18 @@ if __name__ == '__main__':
         logger_mp.info("---------------------🚀start Tracking🚀-------------------------")
         arm_ctrl.speed_gradual_max()
         last_motion_time = time.time()
+
+        left_wrist_clutch = None
+        right_wrist_clutch = None
+        last_left_wrist_target = None
+        last_right_wrist_target = None
+        last_left_gripper_input = None
+        last_right_gripper_input = None
+        left_gripper_takeover = None
+        right_gripper_takeover = None
+        previous_left_gripper_input = None
+        previous_right_gripper_input = None
+        last_missing_camera_warning_time = 0.0
 
         head_img = None
         left_wrist_img = None
@@ -424,6 +552,78 @@ if __name__ == '__main__':
                 break
             torso_yaw_input_value = 0.0
 
+            if PAUSE_TOGGLE:
+                PAUSE_TOGGLE = False
+                if PAUSED:
+                    controls_neutral = (
+                        not args.motion
+                        or args.input_mode != "controller"
+                        or controller_motion_is_neutral(
+                            tele_data,
+                            args.torso_yaw_deadband,
+                            include_side_triggers=(
+                                args.motion_base == "g1d_agv"
+                                and g1d_torso_yaw_input == "side_triggers"
+                            ),
+                        )
+                    )
+                    if not tele_data.motion_data_ready:
+                        logger_mp.warning("Cannot resume: XR controller/hand tracking is not ready.")
+                    elif not controls_neutral:
+                        logger_mp.warning("Cannot resume: center both sticks and release the side triggers first.")
+                    else:
+                        if args.pause_resume_mode == "clutch":
+                            held_left_pose = (
+                                last_left_wrist_target
+                                if last_left_wrist_target is not None
+                                else tele_data.left_wrist_pose
+                            )
+                            held_right_pose = (
+                                last_right_wrist_target
+                                if last_right_wrist_target is not None
+                                else tele_data.right_wrist_pose
+                            )
+                            left_wrist_clutch = make_pose_clutch(held_left_pose, tele_data.left_wrist_pose)
+                            right_wrist_clutch = make_pose_clutch(held_right_pose, tele_data.right_wrist_pose)
+                            if args.ee == "dex1" and args.input_mode == "controller":
+                                left_gripper_takeover = last_left_gripper_input
+                                right_gripper_takeover = last_right_gripper_input
+                                previous_left_gripper_input = tele_data.left_ctrl_triggerValue
+                                previous_right_gripper_input = tele_data.right_ctrl_triggerValue
+                            resume_message = "controller poses re-clutched"
+                        else:
+                            left_wrist_clutch = None
+                            right_wrist_clutch = None
+                            left_gripper_takeover = None
+                            right_gripper_takeover = None
+                            arm_ctrl.speed_gradual_max()
+                            resume_message = "matching the current controller poses"
+                        PAUSED = False
+                        last_motion_time = start_time
+                        logger_mp.info(f"🟢 Teleoperation RESUMED; {resume_message}.")
+                elif args.record and RECORD_RUNNING:
+                    logger_mp.warning("Cannot pause while recording. Save with [s]/left Y or discard with right B first.")
+                else:
+                    PAUSED = True
+                    RECORD_TOGGLE = False
+                    if args.motion and args.input_mode == "controller":
+                        loco_wrapper.Stop()
+                    with xr_motion_data_ready.get_lock():
+                        xr_motion_data_ready.value = False
+                    logger_mp.info("⏸️  Teleoperation PAUSED; robot commands are being held. Press [r]/left X to resume.")
+
+            if PAUSED:
+                # Arm control keeps publishing its last target. Disabling XR readiness
+                # makes the end-effector controller hold its measured position.
+                with xr_motion_data_ready.get_lock():
+                    xr_motion_data_ready.value = False
+                if args.record:
+                    READY = recorder.is_ready()
+                time_elapsed = time.time() - start_time
+                sleep_time = max(0, (1 / args.frequency) - time_elapsed)
+                time.sleep(sleep_time)
+                continue
+
             if args.record and RECORD_DISCARD:  # pribavoj
                 RECORD_DISCARD = False  # pribavoj
                 play_beep(volume=0.001, duration=0.5)  # wake up audio, pribavoj
@@ -440,7 +640,18 @@ if __name__ == '__main__':
             if args.record and RECORD_TOGGLE:
                 RECORD_TOGGLE = False
                 if not RECORD_RUNNING:
-                    if recorder.create_episode():
+                    _, missing_cameras = build_recording_colors(
+                        camera_config,
+                        head_img,
+                        left_wrist_img,
+                        right_wrist_img,
+                    )
+                    if missing_cameras:
+                        logger_mp.error(
+                            "Recording not started: no decoded image from "
+                            f"{', '.join(missing_cameras)} camera(s). Check teleimager-server and --img-server-ip."
+                        )
+                    elif recorder.create_episode():
                         RECORD_RUNNING = True
                         play_beep(volume=0.001, duration=0.5)  # wake up audio, pribavoj
                         play_arpegio(arpeggio = [261.63, 329.63, 392.00])  # pribavoj
@@ -470,10 +681,30 @@ if __name__ == '__main__':
                 with right_gripper_squeeze_in.get_lock():
                     right_gripper_squeeze_in.value = tele_data.right_ctrl_squeezeValue
             elif args.ee == "dex1" and args.input_mode == "controller":
+                had_left_takeover = left_gripper_takeover is not None
+                had_right_takeover = right_gripper_takeover is not None
+                left_gripper_input, left_gripper_takeover = apply_dex1_soft_takeover(
+                    tele_data.left_ctrl_triggerValue,
+                    left_gripper_takeover,
+                    previous_left_gripper_input,
+                )
+                right_gripper_input, right_gripper_takeover = apply_dex1_soft_takeover(
+                    tele_data.right_ctrl_triggerValue,
+                    right_gripper_takeover,
+                    previous_right_gripper_input,
+                )
                 with left_gripper_value.get_lock():
-                    left_gripper_value.value = tele_data.left_ctrl_triggerValue
+                    left_gripper_value.value = left_gripper_input
                 with right_gripper_value.get_lock():
-                    right_gripper_value.value = tele_data.right_ctrl_triggerValue
+                    right_gripper_value.value = right_gripper_input
+                last_left_gripper_input = left_gripper_input
+                last_right_gripper_input = right_gripper_input
+                previous_left_gripper_input = tele_data.left_ctrl_triggerValue
+                previous_right_gripper_input = tele_data.right_ctrl_triggerValue
+                if had_left_takeover and left_gripper_takeover is None:
+                    logger_mp.info("Left Dex1 trigger synchronized after resume.")
+                if had_right_takeover and right_gripper_takeover is None:
+                    logger_mp.info("Right Dex1 trigger synchronized after resume.")
             elif args.ee == "dex1" and args.input_mode == "hand":
                 with left_gripper_value.get_lock():
                     left_gripper_value.value = tele_data.left_hand_pinchValue
@@ -527,10 +758,14 @@ if __name__ == '__main__':
 
             # solve ik using motor data and wrist pose, then use ik results to control arms.
             time_ik_start = time.time()
-            sol_q, sol_tauff  = arm_ik.solve_ik(tele_data.left_wrist_pose, tele_data.right_wrist_pose, current_lr_arm_q, current_lr_arm_dq)
+            left_wrist_target = apply_pose_clutch(tele_data.left_wrist_pose, left_wrist_clutch)
+            right_wrist_target = apply_pose_clutch(tele_data.right_wrist_pose, right_wrist_clutch)
+            sol_q, sol_tauff  = arm_ik.solve_ik(left_wrist_target, right_wrist_target, current_lr_arm_q, current_lr_arm_dq)
             time_ik_end = time.time()
             logger_mp.debug(f"ik:\t{round(time_ik_end - time_ik_start, 6)}")
             arm_ctrl.ctrl_dual_arm(sol_q, sol_tauff)
+            last_left_wrist_target = left_wrist_target.copy()
+            last_right_wrist_target = right_wrist_target.copy()
 
             # record data
             if args.record:
@@ -594,39 +829,19 @@ if __name__ == '__main__':
                 left_arm_action = sol_q[:7]
                 right_arm_action = sol_q[-7:]
                 if RECORD_RUNNING:
-                    colors = {}
+                    colors, missing_cameras = build_recording_colors(
+                        camera_config,
+                        head_img,
+                        left_wrist_img,
+                        right_wrist_img,
+                    )
                     depths = {}
-                    if camera_config['head_camera']['binocular']:
-                        if head_img is not None:
-                            colors[f"color_{0}"] = head_img.bgr[:, :camera_config['head_camera']['image_shape'][1]//2]
-                            colors[f"color_{1}"] = head_img.bgr[:, camera_config['head_camera']['image_shape'][1]//2:]
-                        else:
-                            logger_mp.warning("Head image is None!")
-                        if camera_config['left_wrist_camera']['enable_zmq']:
-                            if left_wrist_img is not None:
-                                colors[f"color_{2}"] = left_wrist_img.bgr
-                            else:
-                                logger_mp.warning("Left wrist image is None!")
-                        if camera_config['right_wrist_camera']['enable_zmq']:
-                            if right_wrist_img is not None:
-                                colors[f"color_{3}"] = right_wrist_img.bgr
-                            else:
-                                logger_mp.warning("Right wrist image is None!")
-                    else:
-                        if head_img is not None:
-                            colors[f"color_{0}"] = head_img.bgr
-                        else:
-                            logger_mp.warning("Head image is None!")
-                        if camera_config['left_wrist_camera']['enable_zmq']:
-                            if left_wrist_img is not None:
-                                colors[f"color_{1}"] = left_wrist_img.bgr
-                            else:
-                                logger_mp.warning("Left wrist image is None!")
-                        if camera_config['right_wrist_camera']['enable_zmq']:
-                            if right_wrist_img is not None:
-                                colors[f"color_{2}"] = right_wrist_img.bgr
-                            else:
-                                logger_mp.warning("Right wrist image is None!")
+                    if missing_cameras and start_time - last_missing_camera_warning_time >= 1.0:
+                        logger_mp.warning(
+                            "Skipping recording frames: no decoded image from "
+                            f"{', '.join(missing_cameras)} camera(s)."
+                        )
+                        last_missing_camera_warning_time = start_time
                     body_state = {
                         "qpos": current_body_state,
                     }
@@ -686,11 +901,12 @@ if __name__ == '__main__':
                         }, 
                         "body": body_action, 
                     }
-                    if args.sim:
-                        sim_state = sim_state_subscriber.read_data()            
-                        recorder.add_item(colors=colors, depths=depths, states=states, actions=actions, sim_state=sim_state)
-                    else:
-                        recorder.add_item(colors=colors, depths=depths, states=states, actions=actions)
+                    if not missing_cameras:
+                        if args.sim:
+                            sim_state = sim_state_subscriber.read_data()
+                            recorder.add_item(colors=colors, depths=depths, states=states, actions=actions, sim_state=sim_state)
+                        else:
+                            recorder.add_item(colors=colors, depths=depths, states=states, actions=actions)
 
             current_time = time.time()
             time_elapsed = current_time - start_time

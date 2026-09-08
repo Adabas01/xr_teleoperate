@@ -8,7 +8,7 @@ Use these example values unless your network changed:
 
 ```text
 Robot SSH IP: 192.168.123.164
-Robot image server IP: 192.168.50.103
+Robot Wi-Fi/WebRTC IP: 192.168.50.103
 Laptop Wi-Fi IP: 192.168.50.240
 Laptop robot interface: enp3s0
 Wi-Fi SSID: ASUS_ROG_X
@@ -94,7 +94,8 @@ PYTHONNOUSERSITE=1 python teleop_hand_and_arm.py \
   --display-mode=ego \
   --arm=G1_29 \
   --ee=dex1 \
-  --img-server-ip=192.168.50.103 \
+  --img-server-ip=192.168.123.164 \
+  --webrtc-server-ip=192.168.50.103 \
   --network-interface=enp3s0 \
   --motion \
   --motion-base=g1d_agv \
@@ -125,13 +126,31 @@ Accept the browser certificate warning if it appears.
 
 ## Controls
 
-Start/stop:
+Start/pause/stop:
 
 ```text
-Pico left X / keyboard r: start teleop
+Pico left X / keyboard r: start, pause, or resume teleop
 Pico left Y / keyboard s: start or save recording
 Pico right A / keyboard q: stop and exit
 ```
+
+To reset the scene between recordings:
+
+1. Save the current episode with Pico left Y.
+2. Pause teleoperation with Pico left X. The arms and grippers hold their positions, and the AGV and column receive zero-velocity commands.
+3. Reset the scene. This software pause is an active position hold, not a safety-rated stop; follow the robot's normal safety procedure before entering its workspace.
+4. Center both joysticks, release both side/grip triggers, and press Pico left X to resume. The controller poses are re-clutched so moving them during the pause does not make the arms jump. Each Dex1 gripper remains held until its index trigger returns to the pre-pause gripper command, preventing an immediate gripper jump as well.
+5. Start the next recording with Pico left Y.
+
+Pausing is rejected while an episode is recording. Save it with left Y or discard it with right B first.
+
+The default `--pause-resume-mode=clutch` behavior preserves the arm and gripper pose held during the pause. To instead make resume behave like a fresh start, add this to the teleoperation command:
+
+```text
+--pause-resume-mode=match
+```
+
+In `match` mode, resuming clears the clutch offsets and moves the robot toward the controllers' current poses. The AGV and column still require centered joysticks before resume, and the column remains at its paused height until commanded with the right joystick.
 
 Motion:
 
@@ -217,7 +236,7 @@ Use that interface in the teleop command:
 
 ### Robot Image Server IP
 
-The `--img-server-ip` value is the robot Wi-Fi IP, not the laptop IP.
+`--img-server-ip` is the robot address used by the laptop for configuration and ZMQ recording frames; prefer the wired robot IP. `--webrtc-server-ip` is the robot Wi-Fi address reachable by the Pico headset.
 
 From an SSH terminal on the robot:
 
@@ -229,7 +248,8 @@ hostname -I
 Use the robot IP on the same Wi-Fi as the Pico/laptop. Example:
 
 ```text
---img-server-ip=192.168.50.103
+--img-server-ip=192.168.123.164
+--webrtc-server-ip=192.168.50.103
 ```
 
 ## Caveats
@@ -244,7 +264,7 @@ If the Dex1 service prints temporary motor timeout warnings but then prints `Dex
 
 If the Pico page does not open, re-check the laptop Wi-Fi IP and use `https`, not `http`.
 
-If the camera stream does not connect, re-check the robot image server Wi-Fi IP used in `--img-server-ip`.
+If recording frames do not connect, re-check the wired robot IP used in `--img-server-ip`. If video does not reach the Pico, re-check the robot Wi-Fi IP used in `--webrtc-server-ip`.
 
 Record conveyor belt task:
 
@@ -254,7 +274,8 @@ PYTHONNOUSERSITE=1 python teleop_hand_and_arm.py \
   --display-mode=ego \
   --arm=G1_29 \
   --ee=dex1 \
-  --img-server-ip=192.168.50.103 \
+  --img-server-ip=192.168.123.164 \
+  --webrtc-server-ip=192.168.50.103 \
   --network-interface=enp3s0 \
   --motion \
   --motion-base=g1d_agv \

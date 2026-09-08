@@ -149,7 +149,8 @@ Rules of thumb:
 - `LAPTOP_WIFI_IFACE` is the interface connected to the same Wi-Fi as the Pico.
 - `LAPTOP_WIFI_IP` is the Wi-Fi IP used in the Pico Vuer URL.
 - `--network-interface` should use `ROBOT_ETH_IFACE`, not the Wi-Fi interface.
-- `--img-server-ip` is `192.168.123.164` for pass-through and the robot Wi-Fi IP for immersive/ego camera mode.
+- `--img-server-ip` is the robot address used by the laptop for camera configuration and ZMQ recording frames; prefer the wired address `192.168.123.164`.
+- `--webrtc-server-ip` is the robot Wi-Fi address reachable by the Pico for immersive/ego video.
 
 ## Install on a New Laptop
 
@@ -366,7 +367,8 @@ PYTHONNOUSERSITE=1 python teleop_hand_and_arm.py \
   --display-mode=immersive \
   --arm=G1_29 \
   --ee=dex1 \
-  --img-server-ip=192.168.212.34 \
+  --img-server-ip=192.168.123.164 \
+  --webrtc-server-ip=192.168.212.34 \
   --network-interface="$ROBOT_ETH_IFACE" \
   --motion \
   --motion-base=g1d_agv \
@@ -390,7 +392,8 @@ PYTHONNOUSERSITE=1 python teleop_hand_and_arm.py \
   --display-mode=ego \
   --arm=G1_29 \
   --ee=dex1 \
-  --img-server-ip=192.168.212.34 \
+  --img-server-ip=192.168.123.164 \
+  --webrtc-server-ip=192.168.212.34 \
   --network-interface="$ROBOT_ETH_IFACE" \
   --motion \
   --motion-base=g1d_agv \
@@ -534,5 +537,5 @@ Expected camera pages:
 # data aquisition
 
 ```bash
-python teleop_hand_and_arm.py   --input-mode=controller   --display-mode=immersive   --arm=G1_29   --ee=dex1   --img-server-ip=192.168.212.34   --network-interface=enx00e04c39c657   --frequency=30   --motion   --motion-base=g1d_agv   --record   --task-dir="$HOME/adam_unitree/datasets/g1d_sort_raw"   --task-name="sort_cubes_cylinders"   --task-goal="Sort the cubes into the brown cardboard box and the cylinders into the green plastic bin."   --task-desc="Pick up all objects from the table. Place every cube into the brown cardboard box and every cylinder into the green plastic bin."   --task-steps="1. Locate an unsorted object; 2. Grasp the object securely; 3. Place a cube into the brown cardboard box or a cylinder into the green plastic bin; 4. Release the object; 5. Repeat until all objects are sorted."
+python teleop_hand_and_arm.py   --input-mode=controller   --display-mode=immersive   --arm=G1_29   --ee=dex1   --img-server-ip=192.168.123.164   --webrtc-server-ip=192.168.212.34   --network-interface=enx00e04c39c657   --frequency=30   --motion   --motion-base=g1d_agv   --record   --task-dir="$HOME/adam_unitree/datasets/g1d_sort_raw"   --task-name="sort_cubes_cylinders"   --task-goal="Sort the cubes into the brown cardboard box and the cylinders into the green plastic bin."   --task-desc="Pick up all objects from the table. Place every cube into the brown cardboard box and every cylinder into the green plastic bin."   --task-steps="1. Locate an unsorted object; 2. Grasp the object securely; 3. Place a cube into the brown cardboard box or a cylinder into the green plastic bin; 4. Release the object; 5. Repeat until all objects are sorted."
 ```

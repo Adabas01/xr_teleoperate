@@ -13,13 +13,19 @@ logger_mp = logging_mp.getLogger(__name__)
         "cmd": "CMD_START"
     }
 
-2) exit
+2) pause or resume
+    {
+        "reqid": unique id,
+        "cmd": "CMD_PAUSE_TOGGLE"
+    }
+
+3) exit
     {
         "reqid": unique id,
         "cmd": "CMD_STOP"
     }
 
-3) start or stop (record toggle)
+4) start or stop (record toggle)
     {
         "reqid": unique id,
         "cmd": "CMD_RECORD_TOGGLE"
@@ -45,10 +51,11 @@ logger_mp = logging_mp.getLogger(__name__)
 # Heartbeat (PUB)
 - Heartbeat Pub format:
     {
-        "START": True | False,          # whether robot follow vr
+        "START": True | False,          # whether teleoperation has started
         "STOP" : True | False,          # whether exit program
+        "PAUSED": True | False,         # whether robot commands are held
         "RECORD_RUNNING": True | False, # whether is recording
-        "RECORD_READY": True | False,   # whether ready to record
+        "READY": True | False,          # whether ready to record
     }
 """
 
@@ -61,7 +68,8 @@ class IPC_Server:
     """
     # Mapping table for on_press keys
     cmd_map = {
-        "CMD_START": "r",          # launch
+        "CMD_START": "start",       # idempotent launch
+        "CMD_PAUSE_TOGGLE": "p",   # pause/resume after launch
         "CMD_STOP": "q",           # exit
         "CMD_RECORD_TOGGLE": "s",  # start & stop (toggle record)
     }
@@ -330,6 +338,11 @@ if __name__ == "__main__":
         if key == "r":
             logger_mp.info("▶️ Sending launch command...")
             rep = client.send_data("CMD_START")
+            logger_mp.info("Reply: %s", rep)
+
+        elif key == "p":
+            logger_mp.info("⏯️ Sending pause/resume command...")
+            rep = client.send_data("CMD_PAUSE_TOGGLE")
             logger_mp.info("Reply: %s", rep)
 
         elif key == "s":

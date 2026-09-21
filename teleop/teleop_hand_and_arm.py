@@ -254,7 +254,7 @@ if __name__ == '__main__':
     parser.add_argument('--torso-yaw-max-rate', type=float, default=0.9, help='Max torso yaw target rate, rad/s')
     parser.add_argument('--torso-yaw-limit', type=float, default=2.0, help='Symmetric torso yaw software limit for joystick control, rad')
     parser.add_argument('--torso-yaw-deadband', type=float, default=0.08, help='Controller deadband for torso yaw input')
-    parser.add_argument('--pause-resume-mode', type=str, choices=['clutch', 'match'], default='clutch', help='On resume, preserve the held arm/gripper pose (clutch) or move toward the current XR pose (match)')
+    parser.add_argument('--pause-resume-mode', type=str, choices=['clutch', 'match'], default='match', help='On resume, preserve the held arm/gripper pose (clutch) or move toward the current XR pose (match)')
     parser.add_argument('--headless', action='store_true', help='Enable headless mode (no display)')
     parser.add_argument('--sim', action = 'store_true', help = 'Enable isaac simulation mode')
     parser.add_argument('--ipc', action = 'store_true', help = 'Enable IPC server to handle input; otherwise enable sshkeyboard')

@@ -236,6 +236,7 @@ if __name__ == '__main__':
     parser.add_argument('--frequency', type = float, default = 30.0, help = 'control and record \'s frequency')
     parser.add_argument('--input-mode', type=str, choices=['hand', 'controller'], default='hand', help='Select XR device input tracking source')
     parser.add_argument('--display-mode', type=str, choices=['immersive', 'ego', 'pass-through'], default='immersive', help='Select XR device display mode')
+    parser.add_argument('--show-wrist-cameras', action='store_true', help='Show the left and right wrist WebRTC streams as picture-in-picture panels in XR')
     parser.add_argument('--arm', type=str, choices=['G1_29', 'G1_23', 'H1_2', 'H1', 'H2'], default='G1_29', help='Select arm controller')
     parser.add_argument('--ee', type=str, choices=['dex1', 'dex3', 'inspire_ftp', 'inspire_dfx', 'brainco'], help='Select end effector controller')
     # network parameters
@@ -314,6 +315,41 @@ if __name__ == '__main__':
             f"Camera data server: {args.img_server_ip}; "
             f"XR WebRTC server: {webrtc_server_ip}."
         )
+        left_wrist_webrtc_url = None
+        right_wrist_webrtc_url = None
+        left_wrist_aspect = 4.0 / 3.0
+        right_wrist_aspect = 4.0 / 3.0
+        if args.show_wrist_cameras:
+            wrist_configs = {
+                "left": camera_config['left_wrist_camera'],
+                "right": camera_config['right_wrist_camera'],
+            }
+            missing_webrtc = [
+                side for side, config in wrist_configs.items()
+                if not config.get('enable_webrtc', False)
+            ]
+            if missing_webrtc:
+                raise ValueError(
+                    "--show-wrist-cameras requires WebRTC for both wrist cameras; "
+                    f"disabled for: {', '.join(missing_webrtc)}."
+                )
+
+            left_wrist_webrtc_url = (
+                f"https://{webrtc_server_ip}:"
+                f"{wrist_configs['left']['webrtc_port']}/offer"
+            )
+            right_wrist_webrtc_url = (
+                f"https://{webrtc_server_ip}:"
+                f"{wrist_configs['right']['webrtc_port']}/offer"
+            )
+            left_shape = wrist_configs['left']['image_shape']
+            right_shape = wrist_configs['right']['image_shape']
+            left_wrist_aspect = left_shape[1] / left_shape[0]
+            right_wrist_aspect = right_shape[1] / right_shape[0]
+            logger_mp.info(
+                "XR wrist-camera panels enabled: "
+                f"left={left_wrist_webrtc_url}, right={right_wrist_webrtc_url}."
+            )
         xr_need_local_img = not (args.display_mode == 'pass-through' or camera_config['head_camera']['enable_webrtc'])
 
         # televuer_wrapper: obtain hand pose data from the XR device and transmit the robot's head camera image to the XR device.
@@ -327,7 +363,11 @@ if __name__ == '__main__':
                                      zmq=camera_config['head_camera']['enable_zmq'],
                                      webrtc=camera_config['head_camera']['enable_webrtc'],
                                      webrtc_url=f"https://{webrtc_server_ip}:{camera_config['head_camera']['webrtc_port']}/offer",
-                                     arm_reference_mode="head_yaw"
+                                     arm_reference_mode="head_yaw",
+                                     left_wrist_webrtc_url=left_wrist_webrtc_url,
+                                     right_wrist_webrtc_url=right_wrist_webrtc_url,
+                                     left_wrist_aspect=left_wrist_aspect,
+                                     right_wrist_aspect=right_wrist_aspect,
                                      )
         controller_button_mapper = ControllerButtonMapper() if args.input_mode == "controller" else None
         

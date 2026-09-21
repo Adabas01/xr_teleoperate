@@ -408,6 +408,19 @@ The Pico Vuer URL still uses the laptop Wi-Fi IP:
 https://<LAPTOP_WIFI_IP>:8012/?ws=wss://<LAPTOP_WIFI_IP>:8012
 ```
 
+### Optional Wrist-Camera Panels
+
+Add the following flag to an immersive, ego, or pass-through teleop command to
+show the left and right wrist cameras as lower picture-in-picture panels:
+
+```bash
+--show-wrist-cameras
+```
+
+This uses the wrist-camera WebRTC endpoints on ports `60002` and `60003`. If a
+panel does not connect in the Pico, open each camera URL in the Pico browser once
+and accept its certificate warning before restarting teleop.
+
 ## Controls
 
 Hold the Pico controllers near the robot initial arm pose before pressing `r`.

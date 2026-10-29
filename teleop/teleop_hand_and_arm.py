@@ -258,6 +258,7 @@ if __name__ == '__main__':
     parser.add_argument('--pause-resume-mode', type=str, choices=['clutch', 'match'], default='match', help='On resume, preserve the held arm/gripper pose (clutch) or move toward the current XR pose (match)')
     parser.add_argument('--headless', action='store_true', help='Enable headless mode (no display)')
     parser.add_argument('--sim', action = 'store_true', help = 'Enable isaac simulation mode')
+    parser.add_argument('--controller-alignment', action='store_true', help='Use packet-matched G1 simulation target limiting')
     parser.add_argument('--ipc', action = 'store_true', help = 'Enable IPC server to handle input; otherwise enable sshkeyboard')
     parser.add_argument('--affinity', action = 'store_true', help = 'Enable high priority and set CPU affinity mode')
     # record mode and task info
@@ -387,7 +388,11 @@ if __name__ == '__main__':
         # arm
         if args.arm == "G1_29":
             arm_ik = G1_29_ArmIK()
-            arm_ctrl = G1_29_ArmController(motion_mode=arm_motion_mode, simulation_mode=args.sim)
+            arm_ctrl = G1_29_ArmController(
+                motion_mode=arm_motion_mode,
+                simulation_mode=args.sim,
+                controller_alignment=args.controller_alignment,
+            )
         elif args.arm == "G1_23":
             arm_ik = G1_23_ArmIK()
             arm_ctrl = G1_23_ArmController(motion_mode=arm_motion_mode, simulation_mode=args.sim)

@@ -1,6 +1,7 @@
 [submodule "teleop/televuer"]
 	path = teleop/televuer
 	url = git@github.com:Adabas01/televuer.git
+	branch = g1d-thesis
 [submodule "teleop/robot_control/dex-retargeting"]
 	path = teleop/robot_control/dex-retargeting
 	url = https://github.com/silencht/dex-retargeting
